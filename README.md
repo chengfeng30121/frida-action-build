@@ -94,7 +94,7 @@ Android 10 上如出现 `unknown processor-specific (type 0x70000001)` 的 linke
 
 | 项目 | 说明 |
 |---|---|
-| **交叉编译 python 绑定未被上游覆盖** | 上游 CI 的 android 目标只编 core/gadget/server，**不编** frida-python。本仓库是全网少见的 `x86_64 → android-arm64` python 绑定交叉构建。为了让它成立，workflow 会给 `releng/env_android.py` 打一个补丁（把构建机的 Python 声明进 meson cross file，用来提供 CPython 头文件；`_frida.abi3.so` 走 limited API 3.7、不链接 libpython）。这条链路**尚未在真实 Release 上验证过**，第一次跑完请务必在设备上 `import frida` 自检。 |
+| **交叉编译 python 绑定未被上游覆盖** | 上游 CI 的 android 目标只编 core/gadget/server，**不编** frida-python。本仓库是 `x86_64 → android-arm64` python 绑定交叉构建。2026-11 首次实跑已确认整条链路可走到 `extension.c` 编译（meson cross file、代码生成、frida-core/gum 全部通过），仅在 CPython 头文件路径上翻车，已用 `scripts/python-include.py`（`CPPFLAGS` 注入 `include`+`platinclude`）修掉。运行期能否在 bionic 上 dlopen 仍须设备实测。 |
 | 双路径 configure | 路径 A（monorepo 根目录 + `--enable-frida-python`，Termux 官方包同一配方）为主；失败自动退回路径 B（`subprojects/frida-python` 独立 configure，设备自编译手册验证过的路径）。哪条成功由 `.so` 的实际位置决定，脚本用全树 `find` 兜底。 |
 | 构建时长 | 全量 40–90 分钟；`deps` 缓存能省掉每轮 ~1GB 的 bundle 下载，但编译本身不可缓存（想再快可自行加 `build/` 缓存，用版本号 + deps 版本做 key）。 |
 | 缓存上限 | GitHub 单仓库 cache 上限 10GB；本流程 NDK(~600MB) + deps(~1GB) 远低于上限。 |
@@ -106,8 +106,9 @@ Android 10 上如出现 `unknown processor-specific (type 0x70000001)` 的 linke
 | 现象 | 处理 |
 |---|---|
 | `ANDROID_NDK_ROOT must be set to the location of your r29 NDK` | NDK 缓存脏了/版本不对，勾 `skip_cache` 重跑 |
+| `extension.c:16: fatal error: 'pyconfig.h' file not found` | 构建机缺 CPython 头文件，或 `python3-dev` 未安装。`scripts/python-include.py` 负责把 `include`+`platinclude`（Ubuntu 的 multiarch 目录）塞进 `CPPFLAGS`；若目录本身不存在就先 `apt install python3-dev` |
 | configure 阶段报 `python` 相关错误 | 说明上游 `env_android.py` 结构变了，`scripts/patch-cross-python.py` 的锚点要跟着改（脚本会打印 `找不到锚点`） |
-| `MISSING _frida.abi3.so` | 看 Actions 里 `build-logs-*` 产物里的 `configure.log` / `make.log` 尾部 |
+| `MISSING _frida.abi3.so` | 看 Actions 里 `build-logs-*` 产物里的 `configure-A/B.log`、`make-A/B.log` 尾部 |
 | Termux 装包报 `not a supported wheel on this platform` | `pip -V` 低于 25.1，或 Termux Python < 3.13 |
 
 ## 目录结构
@@ -118,6 +119,7 @@ scripts/build-android.sh             # configure + make + 手搓 wheel（宿主�
 scripts/make_wheel.py                # 构造 abi3 wheel（含 RECORD/metadata）
 scripts/verify-wheel.py              # 产物自检（结构 / 平台标签 / aarch64 / 无 libpython）
 scripts/deps-version.py              # 从 releng/deps.toml 解析 bundle 版本
+scripts/python-include.py            # 收集构建机 CPython 头文件目录（含 Ubuntu multiarch 的 pyconfig.h）
 scripts/patch-cross-python.py        # 交叉构建时给 releng/env_android.py 注入 python 属性（幂等）
 scripts/fix-bti.sh                   # 设备端：移除 DT_AARCH64_BTI_PLT/PAC_PLT，消除 linker 刷屏
 tests/smoke.sh                       # 本地冒烟测试（不需要 frida/Linux，可离线跑）

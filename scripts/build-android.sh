@@ -7,7 +7,7 @@
 #   SRC              必填，上游 frida 源码树（含 configure 的那一层）
 #   OUT              产物目录（wheel），默认 ./artifacts
 #   LOGDIR           日志目录，默认 $OUT
-#   SCRIPTS          本脚本所在目录（用于调用 make_wheel.py）
+#   SCRIPTS          本脚本所在目录（用于调用 make_wheel.py / python-include.py）
 #   ANDROID_TARGET   默认 android-arm64
 set -euo pipefail
 
@@ -23,8 +23,20 @@ export ANDROID_NDK_ROOT
 mkdir -p "$OUT" "$LOGDIR"
 cd "$SRC"
 
+# ---- CPython 头文件：交叉编译 abi3 扩展需要 pyconfig.h ----
+# Ubuntu 的 pyconfig.h 在 multiarch 目录里，meson 的 python.dependency() 只给 include，
+# 所以这里显式把 include + platinclude 都合进 CPPFLAGS（env_android.py 会把它并入 c_args）。
+PY_INC="$(python3 "$SCRIPTS/python-include.py")"
+if [ -n "$PY_INC" ]; then
+    export CPPFLAGS="$PY_INC ${CPPFLAGS:-}"
+    echo "==> CPython 头文件: $PY_INC"
+else
+    echo "!! 找不到 CPython 头文件，extension.c 会因缺 pyconfig.h 失败" >&2
+    exit 1
+fi
+
 dump_logs() {
-    for f in "$LOGDIR/configure.log" "$LOGDIR/make.log"; do
+    for f in "$LOGDIR"/*.log; do
         [ -f "$f" ] || continue
         echo "----- tail -80 $f -----"
         tail -80 "$f" || true
@@ -35,9 +47,9 @@ dump_logs() {
 attempt_root() {
     echo "==> 尝试 A：根目录 configure（--enable-frida-python）"
     rm -rf build
-    ./configure --host="$TARGET" --enable-frida-python > "$LOGDIR/configure.log" 2>&1 || return 1
-    tail -3 "$LOGDIR/configure.log"
-    make -j"$(nproc)" > "$LOGDIR/make.log" 2>&1 || return 1
+    ./configure --host="$TARGET" --enable-frida-python > "$LOGDIR/configure-A.log" 2>&1 || return 1
+    tail -3 "$LOGDIR/configure-A.log"
+    make -j"$(nproc)" > "$LOGDIR/make-A.log" 2>&1 || return 1
     echo "make done"
 }
 
@@ -46,9 +58,9 @@ attempt_subproject() {
     [ -x subprojects/frida-python/configure ] || return 1
     echo "==> 尝试 B：subprojects/frida-python 独立 configure"
     rm -rf subprojects/frida-python/build
-    ( cd subprojects/frida-python && ./configure --host="$TARGET" ) > "$LOGDIR/configure.log" 2>&1 || return 1
-    tail -3 "$LOGDIR/configure.log"
-    ( cd subprojects/frida-python && make -j"$(nproc)" ) > "$LOGDIR/make.log" 2>&1 || return 1
+    ( cd subprojects/frida-python && ./configure --host="$TARGET" ) > "$LOGDIR/configure-B.log" 2>&1 || return 1
+    tail -3 "$LOGDIR/configure-B.log"
+    ( cd subprojects/frida-python && make -j"$(nproc)" ) > "$LOGDIR/make-B.log" 2>&1 || return 1
     echo "make done"
 }
 

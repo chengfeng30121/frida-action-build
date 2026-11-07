@@ -107,6 +107,16 @@ print("patch-cross-python: OK")
 PY
 
 echo
+echo "== python-include.py =="
+inc="$(python "$REPO/scripts/python-include.py")"
+echo "flags: $inc"
+case "$inc" in
+    *-I*) echo "python-include: OK" ;;
+    *) echo "python-include: FAILED (没输出 -I 目录)"; exit 1 ;;
+esac
+python "$REPO/scripts/python-include.py" --lines | head -3
+
+echo
 echo "== make_wheel.py + verify-wheel.py =="
 mkdir -p "$T/build/frida" "$T/artifacts"
 cp "$T/libfake.so" "$T/build/frida/_frida.abi3.so"

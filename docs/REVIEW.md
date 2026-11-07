@@ -50,7 +50,6 @@
    取决于上游版本，需要第一次实跑日志确认。
 
 ## E. 本地已验证的部分
-
 `tests/smoke.sh`（离线可跑，不需要 frida/Linux）覆盖：
 
 - `fix-bti.sh`：造一个含 `DT_AARCH64_BTI_PLT`/`PAC_PLT` 的 ELF，验证条目被移除、
@@ -65,3 +64,43 @@ $ bash tests/smoke.sh
 ...
 ALL LOCAL SMOKE TESTS PASSED
 ```
+
+## F. 首次实跑反馈（2026-11-07，仓库 chengfeng30121/frida-action-build）
+
+第一次真跑（两条 configure 路径）报同一个错：
+
+```
+frida/extension.c:16:11: fatal error: 'pyconfig.h' file not found
+ninja: build stopped: subcommand failed.
+ninja: ... /frida/subprojects/frida-python/deps/toolchain-linux-x86_64/bin/ninja
+make: *** [Makefile:4: all] Error 1
+```
+
+两个结论：
+
+1. **好消息**：交叉链路本身是通的。能走到 `extension.c` 这一步，说明 meson cross file 被接受、
+   `import('python')` 没卡住、frida-core / frida-gum / 代码生成全部编译成功，
+   只剩最后一步缺头文件。D 节里"交叉编 python 绑定没有先例"的最大不确定性基本被排除。
+2. **根因**：Debian/Ubuntu 的 `pyconfig.h` 装在 multiarch 目录
+   （`/usr/include/x86_64-linux-gnu/python3.x/pyconfig.h`），而 meson 的
+   `python.dependency()` 只回 `sysconfig` 的 `include`（`/usr/include/python3.x`），
+   于是 `<Python.h>` 找得到、`<pyconfig.h>` 找不到。
+
+修正：
+
+- 新增 `scripts/python-include.py`：收集 `include` / `platinclude` / `INCLUDEPY` 以及
+  multiarch、toolcache、pyenv 布局里所有含 `Python.h`/`pyconfig.h` 的目录，输出 `-I...`；
+  没有 `pyconfig.h` 时往 stderr 交警告。
+- `build-android.sh` 把它塞进 `CPPFLAGS`：`env_android.py` 里
+  `c_like_flags += read_envflags("CPPFLAGS")` 且 `c_args = c_like_flags + CFLAGS`，
+  所以 android 目标的 C 编译会带上这些 `-I`，正对 `extension.c` 的需要。
+- workflow 的 apt 列表补回 `python3-dev`（保证 `pyconfig.h` 存在），
+  并把 deps 缓存拆成两条：`frida/deps`（路径 A）与 `frida/subprojects/frida-python/deps`
+  （路径 B，这次实跑的实际落点，见日志里的 `.../subprojects/frida-python/deps/toolchain-linux-x86_64/bin/ninja`）。
+- `build-android.sh` 的日志改为按尝试分文件（`configure-A.log`/`make-A.log`/`-B`），
+  避免后一次覆盖前一次，排错时能同时看到两条路径的真实报错。
+
+注意：这里用**构建机（Linux x86_64）的 pyconfig.h** 配 `-target aarch64-none-linux-android21`。
+对 abi3 扩展这只是"结构体尺寸/特性宏"的来源（`SIZEOF_VOID_P=8` 一致、`Py_LIMITED_API` 生效），
+不参与运行；真正的风险仍在运行期 dlopen，必须在设备上 `import frida` 验证。
+

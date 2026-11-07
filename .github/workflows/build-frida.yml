@@ -140,17 +140,26 @@ jobs:
           grep -q "Pkg.Revision = 29" "$ANDROID_NDK_ROOT/source.properties" \
             || { echo "NDK ${NDK_VER}(b/c) 下载或解包失败" >&2; exit 1; }
 
-      # ---- 缓存：SDK bundle + toolchain bundle（deps.py 落在 <srcroot>/deps）----
-      - name: Cache frida dependency bundles
+      # ---- 缓存：SDK bundle + toolchain bundle ----
+      # 路径 A（根目录 configure）落在 <src>/deps；路径 B（frida-python 独立）落在
+      # <src>/subprojects/frida-python/deps。两条分别缓存，避免"某个路径不存在导致整体不保存"。
+      - name: Cache frida dependency bundles (root layout)
         uses: actions/cache@v4
         with:
           path: frida/deps
-          key: frida-deps-${{ steps.deps.outputs.version }}-${{ env.CACHE_SUFFIX }}
+          key: frida-deps-root-${{ steps.deps.outputs.version }}-${{ env.CACHE_SUFFIX }}
+
+      - name: Cache frida dependency bundles (frida-python layout)
+        uses: actions/cache@v4
+        with:
+          path: frida/subprojects/frida-python/deps
+          key: frida-deps-python-${{ steps.deps.outputs.version }}-${{ env.CACHE_SUFFIX }}
 
       - name: Install host build prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build xz-utils unzip
+          # python3-dev 提供 pyconfig.h（Debian/Ubuntu 上它在 multiarch 目录里）
+          sudo apt-get install -y -qq ninja-build xz-utils unzip python3-dev
 
       # frida-python 的 meson.build 用 import('python') 取 CPython 头文件；
       # 交叉构建时 meson 无法自行确定 host 侧 Python 安装，这里显式注入构建机的 Python。
