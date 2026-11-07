@@ -107,6 +107,7 @@ Android 10 上如出现 `unknown processor-specific (type 0x70000001)` 的 linke
 |---|---|
 | `ANDROID_NDK_ROOT must be set to the location of your r29 NDK` | NDK 缓存脏了/版本不对，勾 `skip_cache` 重跑 |
 | `extension.c:16: fatal error: 'pyconfig.h' file not found` | 构建机缺 CPython 头文件，或 `python3-dev` 未安装。`scripts/python-include.py` 负责把 `include`+`platinclude`（Ubuntu 的 multiarch 目录）塞进 `CPPFLAGS`；若目录本身不存在就先 `apt install python3-dev` |
+| `fatal error: 'aarch64-linux-gnu/python3.x/pyconfig.h' file not found` | Debian 的 `pyconfig.h` 是分发壳，按 `-target` 的架构去 include multiarch 目录。`python-include.py` 会在 `$RUNNER_TEMP/frida-pyconfig-shim` 造同名相对路径的 shim 并排在 `-I` 最前（不改系统文件、不需要 root） |
 | configure 阶段报 `python` 相关错误 | 说明上游 `env_android.py` 结构变了，`scripts/patch-cross-python.py` 的锚点要跟着改（脚本会打印 `找不到锚点`） |
 | `MISSING _frida.abi3.so` | 看 Actions 里 `build-logs-*` 产物里的 `configure-A/B.log`、`make-A/B.log` 尾部 |
 | Termux 装包报 `not a supported wheel on this platform` | `pip -V` 低于 25.1，或 Termux Python < 3.13 |

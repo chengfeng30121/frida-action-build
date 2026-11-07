@@ -114,7 +114,34 @@ case "$inc" in
     *-I*) echo "python-include: OK" ;;
     *) echo "python-include: FAILED (没输出 -I 目录)"; exit 1 ;;
 esac
-python "$REPO/scripts/python-include.py" --lines | head -3
+
+echo "-- 分发壳场景：Debian 的 pyconfig.h 按架构 #include 相对路径 --"
+FAKE="$T/fakeroot/include"
+mkdir -p "$FAKE/python3.14" "$FAKE/x86_64-linux-gnu/python3.14"
+echo '/* minimal */' > "$FAKE/python3.14/Python.h"
+cat > "$FAKE/python3.14/pyconfig.h" <<'EOF'
+#ifndef Py_PYCONFIG_H
+#define Py_PYCONFIG_H
+#if defined(__aarch64__)
+#  include <aarch64-linux-gnu/python3.14/pyconfig.h>
+#elif defined(__x86_64__)
+#  include <x86_64-linux-gnu/python3.14/pyconfig.h>
+#endif
+#endif
+EOF
+echo '#define SIZEOF_LONG 8 /* concrete */' > "$FAKE/x86_64-linux-gnu/python3.14/pyconfig.h"
+export RUNNER_TEMP="$T/tmp"
+flags="$(FRIDA_PYCONFIG_ROOTS="$FAKE" python "$REPO/scripts/python-include.py" --dirs "$FAKE/python3.14" 2>/dev/null)"
+echo "flags: $flags"
+SHIM="$T/tmp/frida-pyconfig-shim"
+[ -f "$SHIM/aarch64-linux-gnu/python3.14/pyconfig.h" ] || { echo "python-include: FAILED (没为 aarch64 分支造 shim)"; exit 1; }
+grep -q "concrete" "$SHIM/aarch64-linux-gnu/python3.14/pyconfig.h" || { echo "python-include: FAILED (shim 内容不是具体配置)"; exit 1; }
+first="${flags%% *}"
+case "$first" in
+    *frida-pyconfig-shim) echo "python-include(shim): OK ($first)" ;;
+    *) echo "python-include: FAILED (shim 没排在 -I 最前: $first)"; exit 1 ;;
+esac
+unset RUNNER_TEMP
 
 echo
 echo "== make_wheel.py + verify-wheel.py =="

@@ -104,3 +104,41 @@ make: *** [Makefile:4: all] Error 1
 对 abi3 扩展这只是"结构体尺寸/特性宏"的来源（`SIZEOF_VOID_P=8` 一致、`Py_LIMITED_API` 生效），
 不参与运行；真正的风险仍在运行期 dlopen，必须在设备上 `import frida` 验证。
 
+## G. 第二次实跑反馈（2026-11-07，同一版本）
+
+补了 `-I` 之后报的是下一层坑：
+
+```
+In file included from subprojects/frida-python/frida/extension.c:16:
+/usr/include/python3.14/pyconfig.h:9:12: fatal error:
+    'aarch64-linux-gnu/python3.14/pyconfig.h' file not found
+```
+
+`/usr/include/python3.14/pyconfig.h` 只是 Debian 的**分发壳**：
+
+```c
+#if defined(__aarch64__)
+#  include <aarch64-linux-gnu/python3.14/pyconfig.h>
+#elif defined(__x86_64__)
+#  include <x86_64-linux-gnu/python3.14/pyconfig.h>
+```
+
+交叉编 aarch64 时 `-target` 定义了 `__aarch64__`，壳就去找 aarch64 的 multiarch 目录，
+而 runner 是 x86_64，只有 `x86_64-linux-gnu` 那份 → 仍然 fatal。
+注意这一步**不能靠加 `-I` 解决**：`Python.h` 用的是 `#include "pyconfig.h"`（引号形式，先搜自身目录），
+先命中 `/usr/include/python3.14/pyconfig.h` 这个壳，`-I` 顺序再靠前也没用。
+
+修正（不改系统文件、不需要 root）：
+
+- `scripts/python-include.py` 解析壳里所有 `<.../pyconfig.h>` 相对路径，
+  在 `$RUNNER_TEMP/frida-pyconfig-shim/<相对路径>` 用**具体那份**配置填上
+  （找不到具体配置时退回内置的最小 ABI 宏），再把 shim 放在 `-I` 最前面，
+  于是壳里那条 `aarch64-linux-gnu/python3.14/pyconfig.h` 命中 shim。
+- 结果：`extension.c` 编过，产物进入链接阶段。
+
+顺带确认（查上游源码后）：`releng/env_generic.py` 对非 FreeBSD 平台都设 `b_lundef=true`，
+而官方 CI 在 Linux/macOS 上照样能链出 python 扩展 —— 因为 meson 的 `extension_module`
+建的是 `shared_module`，不施加 `-Wl,--no-undefined`，所以未定义的 `Py*` 符号不会挡路。
+android 这边 `env_android.py` 也设了 `b_lundef=true`，同理不受影响，**不需要改**。
+
+
