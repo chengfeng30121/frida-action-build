@@ -1,0 +1,238 @@
+name: Build frida android-arm64 wheels
+
+# 上游 PyPI 没有 android_arm64 的 frida wheel，Termux 无法 `pip install frida`。
+# 本工作流在 x86_64 runner 上用官方 NDK r29 交叉编译 frida（含 python 绑定），
+# 产出 abi3 wheel（platform tag: android_24_arm64_v8a）并发布到本仓库 Release。
+
+on:
+  schedule:
+    # 每 6 小时探测一次 PyPI；无新版本时 detect job 几十秒结束，不浪费分钟数
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      frida_version:
+        description: 'frida 版本（如 17.26.1，带不带 v 前缀都行），留空=PyPI 最新'
+        required: false
+        default: ''
+      skip_cache:
+        description: '忽略缓存（NDK / SDK / toolchain 全量重下）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frida-android-arm64
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: frida/frida
+  ANDROID_TARGET: android-arm64
+  WHEEL_PLAT_TAG: android_24_arm64_v8a
+  NDK_VER: r29
+
+jobs:
+  # ---------- 1. 版本探测（轻量；已有同版本 Release 则跳过） ----------
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tools_version: ${{ steps.resolve.outputs.tools_version }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - name: Resolve upstream versions
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REQUESTED: ${{ inputs.frida_version }}
+        run: |
+          set -euo pipefail
+          pypi_ver() {
+            curl -fsSL --retry 3 --retry-delay 2 "https://pypi.org/pypi/$1/json" | jq -r .info.version
+          }
+          if [ -n "${REQUESTED}" ]; then
+            ver="${REQUESTED#v}"
+          else
+            ver="$(pypi_ver frida)"
+          fi
+          tools="$(pypi_ver frida-tools)"
+          case "${ver}" in ''|null) echo "无法解析 frida 版本" >&2; exit 1 ;; esac
+          case "${tools}" in ''|null) echo "无法解析 frida-tools 版本" >&2; exit 1 ;; esac
+
+          # 用 GitHub API 判断，而不是 git ls-remote：私有仓库同样可用
+          if gh api "repos/${REPO}/releases/tags/v${ver}" >/dev/null 2>&1; then
+            echo "release v${ver} 已存在，跳过构建"
+            should_build=false
+          else
+            should_build=true
+          fi
+
+          echo "frida=${ver} frida-tools=${tools} build=${should_build}"
+          {
+            echo "version=${ver}"
+            echo "tools_version=${tools}"
+            echo "should_build=${should_build}"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------- 2. x86_64 交叉构建（6h job 上限，官方 NDK r29 + 官方 SDK/toolchain bundle） ----------
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      FRIDA_VERSION: ${{ needs.detect.outputs.version }}
+      FRIDA_TOOLS_VERSION: ${{ needs.detect.outputs.tools_version }}
+      ANDROID_NDK_ROOT: ${{ github.workspace }}/.ndk
+      CACHE_SUFFIX: ${{ inputs.skip_cache && format('bust-{0}', github.run_id) || 'v1' }}
+    steps:
+      - name: Checkout build scripts (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      # 关键：构建的是上游 frida，而不是本仓库里的 workflow 文件
+      - name: Checkout upstream frida ${{ needs.detect.outputs.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.detect.outputs.version }}
+          path: frida
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Resolve deps bundle version
+        id: deps
+        working-directory: frida
+        run: |
+          set -euo pipefail
+          ver="$(python3 "$GITHUB_WORKSPACE/builder/scripts/deps-version.py")"
+          echo "deps bundle: ${ver}"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+
+      # ---- 缓存：NDK（~600MB，版本不变永命中）----
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_NDK_ROOT }}
+          key: ndk-${{ env.NDK_VER }}-${{ env.CACHE_SUFFIX }}
+
+      - name: Download & unpack NDK ${{ env.NDK_VER }}
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$ANDROID_NDK_ROOT"
+          cd "$RUNNER_TEMP"
+          for v in "$NDK_VER" "${NDK_VER}b" "${NDK_VER}c"; do
+            url="https://dl.google.com/android/repository/android-ndk-${v}-linux.zip"
+            if curl -fsSL --retry 3 --retry-delay 2 -o ndk.zip "$url"; then
+              echo "downloaded ${v}"
+              unzip -q ndk.zip
+              cp -a "android-ndk-${v}/." "$ANDROID_NDK_ROOT/"
+              rm -rf ndk.zip "android-ndk-${v}"
+              break
+            fi
+          done
+          # frida 的 env_android.py 会校验 source.properties 里的主版本号必须等于 29
+          grep -q "Pkg.Revision = 29" "$ANDROID_NDK_ROOT/source.properties" \
+            || { echo "NDK ${NDK_VER}(b/c) 下载或解包失败" >&2; exit 1; }
+
+      # ---- 缓存：SDK bundle + toolchain bundle（deps.py 落在 <srcroot>/deps）----
+      - name: Cache frida dependency bundles
+        uses: actions/cache@v4
+        with:
+          path: frida/deps
+          key: frida-deps-${{ steps.deps.outputs.version }}-${{ env.CACHE_SUFFIX }}
+
+      - name: Install host build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build xz-utils unzip
+
+      # frida-python 的 meson.build 用 import('python') 取 CPython 头文件；
+      # 交叉构建时 meson 无法自行确定 host 侧 Python 安装，这里显式注入构建机的 Python。
+      # 幂等、best-effort：上游将来若原生支持交叉构建，这段补丁也不会造成破坏。
+      - name: Patch releng for cross-compiled python extension
+        run: |
+          python3 builder/scripts/patch-cross-python.py \
+            frida/releng/env_android.py \
+            frida/subprojects/frida-python/releng/env_android.py
+
+      - name: Build frida (${{ env.ANDROID_TARGET }} + python bindings)
+        env:
+          SRC: ${{ github.workspace }}/frida
+          OUT: ${{ github.workspace }}/artifacts
+          LOGDIR: ${{ github.workspace }}/logs
+          SCRIPTS: ${{ github.workspace }}/builder/scripts
+        run: bash "$SCRIPTS/build-android.sh"
+
+      - name: Fetch frida-tools wheel
+        run: |
+          set -euo pipefail
+          python3 -m pip download --disable-pip-version-check \
+            --no-deps --only-binary=:all: \
+            --dest artifacts "frida-tools==${FRIDA_TOOLS_VERSION}"
+          ls -la artifacts/
+
+      # 可选：root 设备直接需要 frida-server，顺手带上（上游没有该资产时不阻塞发布）
+      - name: Fetch frida-server (best effort)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          name="frida-server-${FRIDA_VERSION}-android-arm64.xz"
+          curl -fsSL --retry 3 -o "artifacts/${name}" \
+            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/${name}"
+          ls -la "artifacts/${name}"
+
+      - name: Verify wheel
+        run: python3 builder/scripts/verify-wheel.py artifacts "$WHEEL_PLAT_TAG"
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ needs.detect.outputs.version }}
+          path: logs/*.log
+          if-no-files-found: ignore
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.detect.outputs.version }}
+          name: frida ${{ needs.detect.outputs.version }} · android-arm64 (Termux)
+          body: |
+            frida **${{ needs.detect.outputs.version }}** 的 Android arm64 wheel（Termux / 已 root 的 arm64 设备可用）。
+            frida-tools: ${{ needs.detect.outputs.tools_version }}
+
+            - 平台标签：`${{ env.WHEEL_PLAT_TAG }}`（API 24+，arm64-v8a，CPython 3.7+ ABI3）
+            - 构建方式：ubuntu x86_64 + NDK ${{ env.NDK_VER }} 交叉编译（deps bundle `${{ steps.deps.outputs.version }}`）
+            - 未在上游 CI 覆盖的组合：Android 交叉编译 python 绑定，首次使用请先做一次 `import frida` 自检
+
+            ### 设备端安装（Termux）
+
+            前置：**pip ≥ 25.1**（更早的 Termux pip 只认 `linux_aarch64`，不会识别 `android_24_arm64_v8a`），
+            并且 Termux 的 Python 需为 3.13+（此时 `sys.platform == "android"`）。
+
+            ```bash
+            pkg install python python-pip && pip install -U pip
+            pip install --force-reinstall --no-deps \
+              ${{ github.server_url }}/${{ github.repository }}/releases/download/v${{ needs.detect.outputs.version }}/frida-${{ needs.detect.outputs.version }}-${{ env.WHEEL_PLAT_TAG }}.whl
+            pip install --no-deps \
+              ${{ github.server_url }}/${{ github.repository }}/releases/download/v${{ needs.detect.outputs.version }}/frida_tools-${{ needs.detect.outputs.tools_version }}-py3-none-any.whl
+            python -c 'import frida; print(frida.__version__)'
+            bash fix-bti.sh   # 仅当出现 DT_AARCH64_BTI_PLT linker 刷屏警告时需要
+            ```
+
+            root 设备另需同版本 frida-server（本 Release 内已附带 `.xz`）：
+            ```bash
+            xz -d frida-server-${{ needs.detect.outputs.version }}-android-arm64.xz
+            adb push frida-server-${{ needs.detect.outputs.version }}-android-arm64 /data/local/tmp/frida-server
+            adb shell "su -c 'chmod 755 /data/local/tmp/frida-server && /data/local/tmp/frida-server &'"
+            ```
+          # 本仓库被 checkout 到 builder/，fix-bti.sh 从那里取
+          files: |
+            artifacts/*
+            builder/scripts/fix-bti.sh

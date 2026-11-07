@@ -1,0 +1,15 @@
+# 仓库内所有文本一律 LF：Windows 上编辑过的 .sh / workflow 若带 CRLF，
+# 在 Linux runner 上会以 "bad interpreter / syntax error" 形式炸掉。
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+
+*.patch text eol=lf
+*.png  binary
+*.jpg  binary
+*.whl  binary
+*.xz   binary

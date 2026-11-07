@@ -1,0 +1,19 @@
+# 构建产物 / 本地试跑残留
+build/
+deps/
+artifacts/
+logs/
+*.whl
+*.tar.xz
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
